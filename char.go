@@ -476,6 +476,102 @@ func (p *MemMapFs) CopyFile(src, dst string, optionsA ...string) error {
 	return err
 }
 
+func ifOSFileExists(pathA string) bool {
+	_, err := os.Stat(pathA)
+	return err == nil || os.IsExist(err)
+}
+
+func isOSDir(dirNameA string) bool {
+	f, err := os.Open(dirNameA)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+
+	if mode := fi.Mode(); mode.IsDir() {
+		return true
+	}
+
+	return false
+}
+
+func ensureMakeOSDirs(pathA string) error {
+	if !ifOSFileExists(pathA) {
+		os.MkdirAll(pathA, 0777)
+
+		if !isOSDir(pathA) {
+			return fmt.Errorf("failed to make directory")
+		}
+		return nil
+	} else {
+		if isOSDir(pathA) {
+			return nil
+		} else {
+			return fmt.Errorf("a file with same name exists")
+		}
+	}
+}
+
+func (p *MemMapFs) CopyFilesTo(srcDirA string, patternA string, destDirA string, optionsA ...string) error {
+	filesT := p.GenerateFileListRecursivelyWithExclusive(srcDirA, patternA, "", false)
+
+	for _, v := range filesT {
+		relPathT, errT := p.Rel(srcDirA, p.Dir(v))
+		if errT != nil {
+			return errT
+		}
+
+		destPathT := filepath.Join(destDirA, relPathT)
+
+		errT = ensureMakeOSDirs(destPathT)
+
+		if errT != nil {
+			return errT
+		}
+
+		destFilePathT := filepath.Join(destPathT, filepath.Base(v))
+
+		errT = p.CopyFileTo(v, destFilePathT, optionsA...)
+		if errT != nil {
+			return errT
+		}
+
+	}
+
+	return nil
+
+}
+
+func (p *MemMapFs) EnsureMakeDirs(pathA string) error {
+	if !p.IfFileExists(pathA) {
+		p.MkdirAll(pathA, 0777)
+
+		if !p.IfFileExists(pathA) {
+			return fmt.Errorf("failed to make directory")
+		}
+		return nil
+	} else {
+		if p.IsDir(pathA) {
+			return nil
+		} else {
+			return fmt.Errorf("a file with same name exists")
+		}
+	}
+}
+
+func (p *MemMapFs) Dir(pathA string) string {
+	return filepath.Dir(pathA)
+}
+
+func (p *MemMapFs) Rel(baseA, pathA string) (string, error) {
+	return filepath.Rel(baseA, pathA)
+}
+
 func (p *MemMapFs) Abs(pathA string) string {
 	pathT, errT := filepath.Abs(pathA)
 
