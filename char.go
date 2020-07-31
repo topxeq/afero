@@ -3,7 +3,9 @@
 package afero
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -576,26 +578,26 @@ func (p *MemMapFs) Abs(pathA string) string {
 	pathT, errT := filepath.Abs(pathA)
 
 	if errT != nil {
-		return pathA
+		return filepath.ToSlash(pathA)
 	}
 
 	volT := filepath.VolumeName(pathT)
 
 	if len(volT) < 1 {
-		return pathT
+		return filepath.ToSlash(pathT)
 	}
 
 	if strings.HasPrefix(pathT, volT) {
-		return pathT[len(volT):]
+		return filepath.ToSlash(pathT[len(volT):])
 
 	}
 
-	return pathT
+	return filepath.ToSlash(pathT)
 
 }
 
 func (p *MemMapFs) Join(elem ...string) string {
-	return filepath.Join(elem...)
+	return filepath.ToSlash(filepath.Join(elem...))
 }
 
 func (p *MemMapFs) Glob(patternA string) (matches []string, err error) {
@@ -605,7 +607,7 @@ func (p *MemMapFs) Glob(patternA string) (matches []string, err error) {
 func (p *MemMapFs) GenerateFileListInDir(dirA string, patternA string, verboseA bool) []string {
 	strListT := make([]string, 0, 100)
 
-	pathT := p.Abs(dirA)
+	pathT := dirA
 
 	errT := Walk(p, pathT, func(path string, f os.FileInfo, err error) error {
 		if verboseA {
@@ -616,7 +618,7 @@ func (p *MemMapFs) GenerateFileListInDir(dirA string, patternA string, verboseA 
 			return err
 		}
 
-		// Pl("pathT: %v -> path: %v", pathT, path)
+		// fmt.Printf("pathT: %v -> path: %v\n, %v", pathT, path, f.IsDir())
 
 		// if f.IsDir() { // && path != "." && path != pathT {
 		if f.IsDir() {
@@ -630,7 +632,7 @@ func (p *MemMapFs) GenerateFileListInDir(dirA string, patternA string, verboseA 
 		matchedT, errTI := filepath.Match(patternA, filepath.Base(path))
 		if errTI == nil {
 			if matchedT {
-				strListT = append(strListT, path)
+				strListT = append(strListT, filepath.ToSlash(path))
 			}
 		}
 
@@ -676,7 +678,7 @@ func (p *MemMapFs) GenerateFileListRecursivelyWithExclusive(dirA string, pattern
 					}
 				}
 
-				strListT = append(strListT, path)
+				strListT = append(strListT, filepath.ToSlash(path))
 			}
 		} else {
 			fmt.Printf("matching failed: %v\n", errTI.Error())
@@ -709,4 +711,284 @@ func (p *MemMapFs) Log(fileNameA string, formatA string, argsA ...interface{}) {
 	} else {
 		p.AppendStringToFile(fmt.Sprintf(fmt.Sprintf("[%v] ", time.Now().Format(TimeFormatCompact2))+formatA+"\n", argsA...), fileNameA)
 	}
+}
+
+func (p *MemMapFs) TarwalkFrom(source, target string, tw *tar.Writer) error {
+	info, err := os.Stat(source)
+	if err != nil {
+		return nil
+	}
+
+	var baseDir string
+	if info.IsDir() {
+		baseDir = filepath.Base(source)
+	}
+
+	return filepath.Walk(source,
+		func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			header, err := tar.FileInfoHeader(info, info.Name())
+			if err != nil {
+				return err
+			}
+
+			if baseDir != "" {
+				header.Name = filepath.ToSlash(filepath.Join(baseDir, strings.TrimPrefix(path, source)))
+			}
+
+			if err := tw.WriteHeader(header); err != nil {
+				return err
+			}
+
+			if info.IsDir() {
+				return nil
+			}
+
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			_, err = io.Copy(tw, file)
+			return err
+		})
+}
+
+func (p *MemMapFs) Tarwalk(source, target string, tw *tar.Writer) error {
+	info, err := p.Stat(source)
+	if err != nil {
+		return nil
+	}
+
+	var baseDir string
+	if info.IsDir() {
+		baseDir = filepath.ToSlash(filepath.Base(source))
+	}
+
+	return Walk(p, source,
+		func(path string, info os.FileInfo, err error) error {
+			if path == target {
+				return nil
+			}
+
+			if err != nil {
+				return err
+			}
+			header, err := tar.FileInfoHeader(info, info.Name())
+			if err != nil {
+				return err
+			}
+
+			if info.IsDir() {
+				return nil
+			}
+
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+
+			if baseDir != "" {
+				header.Name = p.Join(baseDir, strings.TrimPrefix(path, source))
+			}
+
+			if err := tw.WriteHeader(header); err != nil {
+				return err
+			}
+
+			file, err := p.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			_, err = io.Copy(tw, file)
+			return err
+		})
+}
+
+func (p *MemMapFs) TarFrom(pathsA []string, tarPathA string) error {
+	file, err := p.Create(tarPathA)
+	if err != nil {
+		return err
+	}
+
+	defer file.Close()
+
+	var fileReader io.WriteCloser = file
+
+	if strings.HasSuffix(tarPathA, ".gz") {
+		fileReader = gzip.NewWriter(file)
+
+		defer fileReader.Close()
+	}
+
+	tw := tar.NewWriter(fileReader)
+	defer tw.Close()
+
+	for _, i := range pathsA {
+		if err := p.TarwalkFrom(i, "", tw); err != nil {
+			return err
+		}
+	}
+
+	return nil
+
+}
+
+func (p *MemMapFs) Tar(pathsA []string, tarPathA string) error {
+	file, err := p.Create(tarPathA)
+	if err != nil {
+		return err
+	}
+
+	defer file.Close()
+
+	var fileReader io.WriteCloser = file
+
+	if strings.HasSuffix(tarPathA, ".gz") {
+		fileReader = gzip.NewWriter(file)
+
+		defer fileReader.Close()
+	}
+
+	tw := tar.NewWriter(fileReader)
+	defer tw.Close()
+
+	for _, i := range pathsA {
+		if err := p.Tarwalk(i, tarPathA, tw); err != nil {
+			return err
+		}
+	}
+
+	return nil
+
+}
+
+func (p *MemMapFs) UntarFrom(sourcefile, extractPath string) error {
+	file, err := os.Open(sourcefile)
+
+	if err != nil {
+		return err
+	}
+
+	defer file.Close()
+
+	var fileReader io.ReadCloser = file
+
+	if strings.HasSuffix(sourcefile, ".gz") {
+		if fileReader, err = gzip.NewReader(file); err != nil {
+			return err
+		}
+		defer fileReader.Close()
+	}
+
+	tarBallReader := tar.NewReader(fileReader)
+
+	for {
+		header, err := tarBallReader.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		filename := p.Join(extractPath, filepath.FromSlash(header.Name))
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			err = p.MkdirAll(filename, os.FileMode(header.Mode)) // or use 0755 if you prefer
+
+			if err != nil {
+				return err
+			}
+
+		case tar.TypeReg:
+			writer, err := p.Create(filename)
+
+			if err != nil {
+				return err
+			}
+
+			io.Copy(writer, tarBallReader)
+
+			err = p.Chmod(filename, os.FileMode(header.Mode))
+
+			if err != nil {
+				return err
+			}
+
+			writer.Close()
+		default:
+			// log.Printf("Unable to untar type: %c in file %s", header.Typeflag, filename)
+		}
+	}
+	return nil
+}
+
+func (p *MemMapFs) Untar(sourcefile, extractPath string) error {
+	file, err := p.Open(sourcefile)
+
+	if err != nil {
+		return err
+	}
+
+	defer file.Close()
+
+	var fileReader io.ReadCloser = file
+
+	if strings.HasSuffix(sourcefile, ".gz") {
+		if fileReader, err = gzip.NewReader(file); err != nil {
+			return err
+		}
+		defer fileReader.Close()
+	}
+
+	tarBallReader := tar.NewReader(fileReader)
+
+	for {
+		header, err := tarBallReader.Next()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+
+		filename := p.Join(extractPath, filepath.FromSlash(header.Name))
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			err = p.MkdirAll(filename, os.FileMode(header.Mode)) // or use 0755 if you prefer
+
+			if err != nil {
+				return err
+			}
+
+		case tar.TypeReg:
+			writer, err := p.Create(filename)
+
+			if err != nil {
+				return err
+			}
+
+			io.Copy(writer, tarBallReader)
+
+			err = p.Chmod(filename, os.FileMode(header.Mode))
+
+			if err != nil {
+				return err
+			}
+
+			writer.Close()
+		default:
+			// log.Printf("Unable to untar type: %c in file %s", header.Typeflag, filename)
+		}
+	}
+	return nil
 }

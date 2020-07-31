@@ -41,6 +41,7 @@ func readDirNames(fs Fs, dirname string) ([]string, error) {
 // walk recursively descends path, calling walkFn
 // adapted from https://golang.org/src/path/filepath/path.go
 func walk(fs Fs, path string, info os.FileInfo, walkFn filepath.WalkFunc) error {
+	path = filepath.ToSlash(path)
 	err := walkFn(path, info, nil)
 	if err != nil {
 		if info.IsDir() && err == filepath.SkipDir {
@@ -59,7 +60,7 @@ func walk(fs Fs, path string, info os.FileInfo, walkFn filepath.WalkFunc) error 
 	}
 
 	for _, name := range names {
-		filename := filepath.Join(path, name)
+		filename := filepath.ToSlash(filepath.Join(path, name))
 		fileInfo, err := lstatIfPossible(fs, filename)
 		if err != nil {
 			if err := walkFn(filename, fileInfo, err); err != nil && err != filepath.SkipDir {
@@ -98,6 +99,7 @@ func (a Afero) Walk(root string, walkFn filepath.WalkFunc) error {
 }
 
 func Walk(fs Fs, root string, walkFn filepath.WalkFunc) error {
+	root = filepath.ToSlash(root)
 	info, err := lstatIfPossible(fs, root)
 	if err != nil {
 		return walkFn(root, nil, err)
