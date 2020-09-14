@@ -1,4 +1,4 @@
-module github.com/spf13/afero
+module github.com/topxeq/afero
 
 require (
 	github.com/pkg/sftp v1.10.1
